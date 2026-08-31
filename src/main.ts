@@ -630,15 +630,28 @@ async function init() {
   // has already populated the editor we're about to read from.
   restoreViewModeFromStorage(state);
 
-  // Confirm close if dirty
-  const win = getCurrentWindow();
-  await win.onCloseRequested(async (event) => {
-    if (state.dirty) {
-      const discard = await ask("You have unsaved changes. Close without saving?", {
+  // Confirm close if dirty. The backend intercepts the close request on
+  // the main thread and emits "close-confirm" here only when the window has
+  // unsaved edits; a clean window closes without ever touching this path.
+  // We confirm via the native dialog, then explicitly destroy the window so
+  // the close is never swallowed by a hung event hook.
+  await listen("close-confirm", async () => {
+    let discard: boolean;
+    try {
+      discard = await ask("You have unsaved changes. Close without saving?", {
         title: "iso.md",
         kind: "warning",
       });
-      if (!discard) event.preventDefault();
+    } catch (err) {
+      console.error("close-confirm dialog failed:", err);
+      return;
+    }
+    if (discard) {
+      try {
+        await invoke("confirm_close");
+      } catch (err) {
+        console.error("confirm_close failed:", err);
+      }
     }
   });
 

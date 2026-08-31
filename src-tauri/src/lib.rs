@@ -100,6 +100,15 @@ fn new_window(app: AppHandle, reg: State<'_, WindowRegistry>) -> Result<(), Stri
     create_window(&app, reg.inner(), None).map(|_| ())
 }
 
+// The frontend calls this after the user confirms discarding unsaved edits
+// in the close-confirm dialog. Closing through this command (rather than
+// letting the window's own close flow re-fire) guarantees the window
+// actually disappears.
+#[tauri::command]
+fn confirm_close(window: WebviewWindow) {
+    let _ = window.destroy();
+}
+
 fn open_one(app: &AppHandle, reg: &WindowRegistry, path: String, hint: Option<String>) {
     // 1. Already open somewhere → just focus that window.
     let existing = {
@@ -211,6 +220,24 @@ fn attach_destroy_cleanup(app: &AppHandle, win: &WebviewWindow) {
     let app = app.clone();
     let label = win.label().to_string();
     win.on_window_event(move |event| {
+        // Intercept the user's close request (traffic-light button, Cmd+W,
+        // File/Window > Close) before it reaches the frontend. If the
+        // window holds unsaved edits we prevent the close here, on the main
+        // thread, and ask the frontend to confirm — the decision to destroy
+        // is then an explicit command rather than a fragile await inside the
+        // frontend's close hook. Clean windows fall through and close
+        // normally via Destroyed below.
+        if let WindowEvent::CloseRequested { api, .. } = event {
+            let dirty = app
+                .try_state::<WindowRegistry>()
+                .map(|reg| reg.inner.lock().unwrap().dirty.get(&label).copied().unwrap_or(false))
+                .unwrap_or(false);
+            if dirty {
+                api.prevent_close();
+                let _ = app.emit_to(label.as_str(), "close-confirm", ());
+            }
+            return;
+        }
         if matches!(event, WindowEvent::Destroyed) {
             if let Some(reg) = app.try_state::<WindowRegistry>() {
                 let mut inner = reg.inner.lock().unwrap();
@@ -448,6 +475,7 @@ pub fn run() {
             set_window_state,
             open_files,
             new_window,
+            confirm_close,
             watch_file,
             unwatch_file,
             mark_self_write
